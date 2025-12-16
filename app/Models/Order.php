@@ -3,8 +3,11 @@
 namespace App\Models;
 
 use App\Enums\OrderStatus;
+use App\Services\EventService;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
 
 class Order extends Model
 {
@@ -46,22 +49,45 @@ class Order extends Model
                 $order->status = OrderStatus::Placed;
             }
         });
+
+        static::created(function (Order $order) {
+            // here we can either use new() or app() [service container]
+            // in this case using service container is a bit unneccessary since we dont even have a constructor function
+            // service container is powerful when we can do mock, and also dependency management since we can decide what to inject
+            app(EventService::class)->recordEvent(
+                $order,
+                'order_created',
+                ['status' => $order->status->value]
+            );
+        });
     }
 
-    public function transitionTo(OrderStatus $status): void
+    public function transitionTo(OrderStatus $newStatus): void
     {
+        $oldStatus = $this->status;
         // $this->status is OrderStatus enum instance hence can use the method defined in there directly
-        if (!$this->status->canTransitionTo($status)) {
+        if (!$this->status->canTransitionTo($newStatus)) {
             // for this, we normal Exception is too generic
             // we can use more specific Exception for better semantic clarity
             // But in the catch block has to catch this specific Exception 
             throw new \InvalidArgumentException(
-                "Cannot transition from {$this->status->value} to {$status->value}"
+                "Cannot transition from {$this->status->value} to {$newStatus->value}"
             );
         }
 
-        $this->status = $status;
-        $this->save();
+        DB::transaction(function () use ($oldStatus, $newStatus) {
+            $this->status = $newStatus;
+            $this->save();
+
+            app(EventService::class)->recordEvent(
+                $this,
+                'status_changed',
+                [
+                    'from' => $oldStatus->value,
+                    'to' => $newStatus->value,
+                ]
+            );
+        });
     }
 
     private static function generateReference(): string
@@ -71,5 +97,10 @@ class Order extends Model
         $nextNumber = $lastOrder ? $lastOrder->id + 1 : 1;
 
         return 'ORD-' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+    }
+
+    public function events(): HasMany
+    {
+        return $this->hasMany(OrderEvent::class);
     }
 }
